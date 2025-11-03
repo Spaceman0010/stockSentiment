@@ -1,0 +1,29 @@
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Datasets
+*.csv
+*.tsv
+*.zip
+*.json
+*.gz
+
+# IMDB dataset folders
+data/aclImdb/
+data/training.*.csv
+data/*.csv
+
+# Model artifacts
+*.pkl
+*.joblib
+model/
