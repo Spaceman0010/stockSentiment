@@ -5,7 +5,7 @@ const RedditPost = require('../models/RedditPost');
 const Sentiment = require('../models/Sentiment');
 
 // ENV variable for Flask API
-const FLASK_API_URL = process.env.FLASK_API_URL || 'http://127.0.0.1:5000';
+const FLASK_API_URL = process.env.FLASK_API_URL || 'http://127.0.0.1:5051';
 
 // POST /api/sentiment/analyse
 // Send Reddit posts to Flask for prediction, then save results
