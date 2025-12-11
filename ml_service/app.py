@@ -1,29 +1,34 @@
-# ml_service/app.py
+#update: Heavily commenting out the file to keep track of everything
 """
-Flask microservice for sentiment analysis.
+Adding this short brief for my own understanding later on,
+Flask microservice for sentiment analysis
 
-Right now it serves ONE model:
-- Logistic Regression trained on FinancialPhraseBank
-  - vectorizer: model/vectorizer_lr.pkl
-  - classifier: model/lr_model.pkl
+Update: now now it serves TWO models:
+- Logistic Regression("lr")
+- Support Vector Machine("svm")
+
+Both models share the same TF-IDF vectoriser:
+    - vectorizer: model/vectorizer_lr.pkl
+    - LR classifier: model/lr_model.pkl
+    - SVM classifier: model/svm_model.pkl
 
 Endpoint:
     POST /predict
     JSON body:
     {
-        "model": "lr",
+        "model": "lr" | "svm",
         "posts": [
             { "title": "...", "body": "..." },
             ...
         ]
     }
 
-Response:
+Example Response:
     {
         "model": "lr",
         "predictions": [
             { "label": "positive", "score": 0.81 },
-            { "label": "neutral", "score": 0.65 },
+            { "label": "neutral",  "score": 0.65 },
             ...
         ]
     }
@@ -33,38 +38,58 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import joblib
 import os
+import numpy as np  # for sigmoid on SVM decision_function
 
-#Flask setup
-
+# Flask setup
 app = Flask(__name__)
-CORS(app)  # allow cross-origin requests (Node / frontend can call this)
+CORS(app)  # allow cross-origin requests (Node/frontend can call this)
 
 
-# Loading models on startup 
-
-# Adding LR for now, will add other models later
+# ----------------------------------------
+# Loading models on startup
+# ----------------------------------------
+# I'm keeping this very explicit so its easy to understand
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
 LR_VECTORIZER_PATH = os.path.join(MODEL_DIR, "vectorizer_lr.pkl")
-LR_MODEL_PATH = os.path.join(MODEL_DIR, "lr_model.pkl")
+LR_MODEL_PATH      = os.path.join(MODEL_DIR, "lr_model.pkl")
+SVM_MODEL_PATH     = os.path.join(MODEL_DIR, "svm_model.pkl")
 
-print("🔁 Loading Logistic Regression model...")
+print("🔁 🔁 Loading sentiment models...")
+
+vectorizer = None   # shared TF IDF vectoriser
+MODELS = {}         # dict to hold all classifiers, e.g. {"lr": ..., "svm": ...}
 
 try:
-    lr_vectorizer = joblib.load(LR_VECTORIZER_PATH)
+    # shared TF IDF vectoriser trained on my large combined dataset
+    vectorizer = joblib.load(LR_VECTORIZER_PATH)
+    print(f"✅ ✅ Loaded TF-IDF vectoriser from {LR_VECTORIZER_PATH}")
+
+    # Logistic Regression model
     lr_model = joblib.load(LR_MODEL_PATH)
-    print("✅ Loaded LR vectorizer and model successfully.")
-    print("   Classes:", lr_model.classes_)
+    MODELS["lr"] = lr_model
+    print(f"✅ ✅ Loaded LR model from {LR_MODEL_PATH}")
+    print("➡️ ➡️ LR classes:", lr_model.classes_)
+
+    # SVM model
+    svm_model = joblib.load(SVM_MODEL_PATH)
+    MODELS["svm"] = svm_model
+    print(f"✅ ✅ Loaded SVM model from {SVM_MODEL_PATH}")
+    print("➡️ ➡️ SVM classes:", svm_model.classes_)
+
 except Exception as e:
-    print("❌ Failed to load LR model/vectorizer:", e)
-    lr_vectorizer = None
-    lr_model = None
+    # If something fails here, I want a loud error in the logs, its just easier to stop among all the mess.
+    print("❌ ❌ ❌ Failed to load one or more models/vectoriser:", e)
+    vectorizer = None
+    MODELS = {}
 
 
-# Helper for LR predictions 
+# --------------------------------------------------
+# Helper: generic prediction for any model in MODELS
+# --------------------------------------------------
 
-def predict_with_lr(posts):
+def predict_with_model(model_key, posts):
     """
     posts: list of dicts like:
         { "title": "...", "body": "..." }
@@ -72,8 +97,14 @@ def predict_with_lr(posts):
     Returns: list of dicts:
         { "label": str, "score": float }
     """
-    if lr_vectorizer is None or lr_model is None:
-        raise RuntimeError("LR model not loaded")
+
+    if vectorizer is None or not MODELS:
+        raise RuntimeError("Models/vectoriser not loaded")
+
+    if model_key not in MODELS:
+        raise RuntimeError(f"Unknown model key: {model_key}")
+
+    model = MODELS[model_key]
 
     # Building raw text for each post: title + body
     texts = []
@@ -81,22 +112,37 @@ def predict_with_lr(posts):
         title = p.get("title", "") or ""
         body = p.get("body", "") or ""
         text = (str(title) + " " + str(body)).strip()
-        texts.append(text if text else " ")  # avoiding empty string edge cases here
+        # avoid completely empty strings (its rare edge case)
+        texts.append(text if text else " ")
 
-    # Vectorise
-    X_vec = lr_vectorizer.transform(texts)
+    # Text -> TF-IDF vectors
+    X_vec = vectorizer.transform(texts)
 
-    # Get probabilities for each class
-    # lr_model.classes_ gives the order of the columns in predict_proba
-    if hasattr(lr_model, "predict_proba"):
-        probas = lr_model.predict_proba(X_vec)
-        class_labels = list(lr_model.classes_)
+    #update: using sigmoid formula to convert svm margins into 0-1 probability style 
+    # Both LR and (optionally) SVM may expose predict_proba.
+    # If not, but decision_function exists (typical SVM case),
+    # I convert the raw margins into 0–1 style scores using a sigmoid.
+    if hasattr(model, "predict_proba"):
+        probas = model.predict_proba(X_vec)
+        class_labels = list(model.classes_)
+    elif hasattr(model, "decision_function"):
+        # decision_function returns margins; higher = more confident
+        margins = model.decision_function(X_vec)
+
+        # Ensure 2D shape: (n_samples, n_classes)
+        margins = np.atleast_2d(margins)
+
+        class_labels = list(model.classes_)
+
+        # Apply sigmoid to each margin to squash into [0,1]
+        # prob = 1 / (1 + exp(-margin))
+        probas = 1.0 / (1.0 + np.exp(-margins))
     else:
-        raise RuntimeError("LR model does not support predict_proba") 
-        
+        raise RuntimeError(f"Model '{model_key}' does not support "
+                           "predict_proba or decision_function")
 
     predictions = []
-    for i in range(X_vec.shape[0]):
+    for i in range(probas.shape[0]):
         row_probs = probas[i]
         max_idx = row_probs.argmax()
         label = class_labels[max_idx]
@@ -110,23 +156,30 @@ def predict_with_lr(posts):
     return predictions
 
 
+# -------------------------------------------------------------------
 # Routes
+# -------------------------------------------------------------------
 
 @app.route("/", methods=["GET"])
 def health_check():
-    """Simple health endpoint."""
-    return jsonify({"status": "ok", "message": "🔥 Flask ML service is running"})
+    """Simple health check endpoint"""
+    return jsonify({
+        "status": "ok",
+        "message": "🔥 🔥 🔥 Flask ML service is running",
+        "available_models": list(MODELS.keys())
+    })
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
     """
-    Main prediction endpoint.
+    Main prediction endpoint
 
     Expects JSON:
-        { "model": "lr", "posts": [...] }
+        { "model": "lr" | "svm", "posts": [...] }
 
-    For now, only "lr" is supported.
+    If an unknown model is requested, I fall back to "lr"
+    to keep the API forgiving.
     """
     try:
         data = request.get_json(force=True)
@@ -136,25 +189,25 @@ def predict():
     if not data:
         return jsonify({"error": "Missing JSON body"}), 400
 
-    model_name = data.get("model", "lr")
+    # default to LR if nothing is provided
+    requested_model = (data.get("model") or "lr").lower()
     posts = data.get("posts")
 
     if not posts or not isinstance(posts, list):
         return jsonify({"error": "Field 'posts' must be a non-empty list"}), 400
 
-    # For now only supporting Logistic Regression
-    if model_name != "lr":
-        # Later i'll add svm, distilbert
-        model_name = "lr"
+    # Fallback to LR if someone passes a wrong model name
+    if requested_model not in MODELS:
+        requested_model = "lr"
 
     try:
-        predictions = predict_with_lr(posts)
+        predictions = predict_with_model(requested_model, posts)
     except Exception as e:
-        print("❌ Error during prediction:", e)
+        print("❌ ❌ ❌ Error during prediction:", e)
         return jsonify({"error": "Prediction failed", "details": str(e)}), 500
 
     return jsonify({
-        "model": model_name,
+        "model": requested_model,
         "predictions": predictions
     })
 
