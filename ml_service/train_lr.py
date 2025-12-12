@@ -9,7 +9,7 @@ from sklearn.metrics import classification_report, accuracy_score
 import joblib  # for saving model objects to disk
 
 
-# Paths / constants
+# Paths 
 
 # Update: now training on the merged dataset (PhraseBank + stock_data + WSB)
 DATA_PATH = os.path.join("data", "all_train.csv")

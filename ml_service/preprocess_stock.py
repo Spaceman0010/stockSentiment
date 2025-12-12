@@ -4,7 +4,7 @@ import re
 
 # Paths 
 RAW_PATH = Path("data/stock_data.csv")      # original Kaggle file
-OUT_PATH = Path("data/stock_clean.csv")     # cleaned output
+OUT_PATH = Path("data/stock_clean.csv")     # cleaned output file
 
 
 def clean_text(text: str) -> str:

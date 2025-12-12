@@ -3,7 +3,7 @@
 Adding this short brief for my own understanding later on,
 Flask microservice for sentiment analysis
 
-Update: now now it serves TWO models:
+Update: now now it serves two models:
 - Logistic Regression("lr")
 - Support Vector Machine("svm")
 
@@ -40,15 +40,22 @@ import joblib
 import os
 import numpy as np  # for sigmoid on SVM decision_function
 
+# -----------------------------
+# Update: DistilBERT imports (updated)
+# -----------------------------
+# using HuggingFace Transformers to load my fine tuned DistilBERT
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch  # DistilBERT runs on PyTorch
+
 # Flask setup
 app = Flask(__name__)
 CORS(app)  # allow cross-origin requests (Node/frontend can call this)
 
 
-# ----------------------------------------
+# -----------------------
 # Loading models on startup
-# ----------------------------------------
-# I'm keeping this very explicit so its easy to understand
+# -----------------------
+# im keeping this very explicit so its easy to understand
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
@@ -56,33 +63,62 @@ LR_VECTORIZER_PATH = os.path.join(MODEL_DIR, "vectorizer_lr.pkl")
 LR_MODEL_PATH      = os.path.join(MODEL_DIR, "lr_model.pkl")
 SVM_MODEL_PATH     = os.path.join(MODEL_DIR, "svm_model.pkl")
 
+# ---DistilBERT path---
+DISTILBERT_DIR = os.path.join(MODEL_DIR, "distilbert_fin_sentiment")
+
 print("🔁 🔁 Loading sentiment models...")
 
 vectorizer = None   # shared TF IDF vectoriser
 MODELS = {}         # dict to hold all classifiers, e.g. {"lr": ..., "svm": ...}
 
+# -----------------------------
+# Update: DistilBERT objects 
+# -----------------------------
+distilbert_tokenizer = None
+distilbert_model = None
+
 try:
-    # shared TF IDF vectoriser trained on my large combined dataset
+    # loading up the shared TF IDF vectoriser trained on my large combined dataset
     vectorizer = joblib.load(LR_VECTORIZER_PATH)
     print(f"✅ ✅ Loaded TF-IDF vectoriser from {LR_VECTORIZER_PATH}")
 
-    # Logistic Regression model
+    # loding the Logistic Regression model
     lr_model = joblib.load(LR_MODEL_PATH)
     MODELS["lr"] = lr_model
     print(f"✅ ✅ Loaded LR model from {LR_MODEL_PATH}")
     print("➡️ ➡️ LR classes:", lr_model.classes_)
 
-    # SVM model
+    # loading up SVM model
     svm_model = joblib.load(SVM_MODEL_PATH)
     MODELS["svm"] = svm_model
     print(f"✅ ✅ Loaded SVM model from {SVM_MODEL_PATH}")
     print("➡️ ➡️ SVM classes:", svm_model.classes_)
 
+    # ---Update: Loading DistilBERT model--- 
+    # Note to self: Im loading my fine tuned DistilBERT model from the local folder
+    # If this fails, LR/SVM should still work, so i do not crash the whole service.
+    try:
+        distilbert_tokenizer = AutoTokenizer.from_pretrained(DISTILBERT_DIR)
+        distilbert_model = AutoModelForSequenceClassification.from_pretrained(DISTILBERT_DIR)
+
+        # testing: set to evaluation mode (important: disables dropout etc.)
+        distilbert_model.eval()
+
+        print(f"✅ ✅ Loaded DistilBERT from {DISTILBERT_DIR}")
+        print("➡️ ➡️ DistilBERT id2label:", distilbert_model.config.id2label)
+
+    except Exception as bert_err:
+        print("⚠️ ⚠️ DistilBERT not loaded (LR/SVM still available):", bert_err)
+        distilbert_tokenizer = None
+        distilbert_model = None
+
 except Exception as e:
-    # If something fails here, I want a loud error in the logs, its just easier to stop among all the mess.
+    # If something fails here, I want a loud error in the logs, its just easier to spot among all the mess.
     print("❌ ❌ ❌ Failed to load one or more models/vectoriser:", e)
     vectorizer = None
     MODELS = {}
+    distilbert_tokenizer = None
+    distilbert_model = None
 
 
 # --------------------------------------------------
@@ -119,9 +155,9 @@ def predict_with_model(model_key, posts):
     X_vec = vectorizer.transform(texts)
 
     #update: using sigmoid formula to convert svm margins into 0-1 probability style 
-    # Both LR and (optionally) SVM may expose predict_proba.
+    # Both LR and (optionally) SVM may expose predict_proba
     # If not, but decision_function exists (typical SVM case),
-    # I convert the raw margins into 0–1 style scores using a sigmoid.
+    # I convert the raw margins into 0–1 style scores using a sigmoid
     if hasattr(model, "predict_proba"):
         probas = model.predict_proba(X_vec)
         class_labels = list(model.classes_)
@@ -156,17 +192,86 @@ def predict_with_model(model_key, posts):
     return predictions
 
 
-# -------------------------------------------------------------------
+# --------------------------------------------------
+# Update: Helper for DistilBERT prediction 
+# --------------------------------------------------
+    """
+    DistilBERT path.
+    posts: list of dicts like:
+        { "title": "...", "body": "..." }
+
+    Returns: list of dicts:
+        { "label": str, "score": float }
+    """
+def predict_with_distilbert(posts):
+
+    if distilbert_model is None or distilbert_tokenizer is None:
+        raise RuntimeError("DistilBERT model not loaded")
+
+    # Building raw text for each post: title + body (same style as LR/SVM)
+    texts = []
+    for p in posts:
+        title = p.get("title", "") or ""
+        body = p.get("body", "") or ""
+        text = (str(title) + " " + str(body)).strip()
+        texts.append(text if text else " ")
+
+    # Again adding this to avoid confusion
+    # Tokenising = converting text into numbers the model understands
+    # padding = True makes all sequences same length in batch
+    # truncation = True cuts very long texts safely
+    encodings = distilbert_tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=128,        # keeping this consistent with training
+        return_tensors="pt"    # return PyTorch tensors
+    )
+
+    # running on CPU (Flask is running locally)
+    distilbert_model.to("cpu")
+    encodings = {k: v.to("cpu") for k, v in encodings.items()}
+
+    # inference mode: no gradients, faster + less memory (note: still testing)
+    with torch.no_grad():
+        outputs = distilbert_model(**encodings)
+        logits = outputs.logits                 # raw outputs (not probabilities yet)
+        probs = torch.softmax(logits, dim=-1)   # convert logits -> probabilities
+
+    # id2label is how the model maps class ids back to readable labels
+    id2label = distilbert_model.config.id2label
+
+    predictions = []
+    for i in range(len(texts)):
+        row = probs[i]
+        max_idx = int(torch.argmax(row).item())
+        score = float(row[max_idx].item())
+        label = str(id2label[max_idx]).lower()  # keeping labels consistent with LR/SVM style
+
+        predictions.append({
+            "label": label,
+            "score": score
+        })
+
+    return predictions
+
+
+# -----------------
 # Routes
-# -------------------------------------------------------------------
+# -----------------
 
 @app.route("/", methods=["GET"])
 def health_check():
-    """Simple health check endpoint"""
+    # simple health check endpoint
+    # adding distilbert to the list only if its actually loaded
+    available = list(MODELS.keys())
+    if distilbert_model is not None:
+        available.append("distilbert")
+
     return jsonify({
         "status": "ok",
         "message": "🔥 🔥 🔥 Flask ML service is running",
-        "available_models": list(MODELS.keys())
+        "available_models": available
     })
 
 
@@ -174,12 +279,11 @@ def health_check():
 def predict():
     """
     Main prediction endpoint
-
     Expects JSON:
         { "model": "lr" | "svm", "posts": [...] }
 
-    If an unknown model is requested, I fall back to "lr"
-    to keep the API forgiving.
+    If an unknown model is requested, i fall back to "lr"
+    to keep the API forgiving and not to break anything.
     """
     try:
         data = request.get_json(force=True)
@@ -197,11 +301,17 @@ def predict():
         return jsonify({"error": "Field 'posts' must be a non-empty list"}), 400
 
     # Fallback to LR if someone passes a wrong model name
-    if requested_model not in MODELS:
+    # (update: allow distilbert as well)
+    if requested_model not in MODELS and requested_model != "distilbert":
         requested_model = "lr"
 
     try:
-        predictions = predict_with_model(requested_model, posts)
+        # update: distilbert has its own path, lr/svm goes to the old function
+        if requested_model == "distilbert":
+            predictions = predict_with_distilbert(posts)
+        else:
+            predictions = predict_with_model(requested_model, posts)
+
     except Exception as e:
         print("❌ ❌ ❌ Error during prediction:", e)
         return jsonify({"error": "Prediction failed", "details": str(e)}), 500
