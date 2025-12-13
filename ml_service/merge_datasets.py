@@ -6,7 +6,7 @@ PHRASEBANK_PATH = os.path.join("data", "combined_train.csv")  # financial news (
 STOCK_PATH      = os.path.join("data", "stock_clean.csv")     # cleaned stock market sentiment dataset(kaggle)
 WSB_PATH        = os.path.join("data", "wsb_clean.csv")       # cleaned reddit WSB comments (kaggle)
 
-OUT_PATH        = os.path.join("data", "all_train.csv") # Combined output file of all 3 datasets
+OUT_PATH        = os.path.join("data", "all_combined_train.csv") # Combined output file of all 3 datasets
 
 
 def load_dataset(path, source_name):
